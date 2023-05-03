@@ -41,6 +41,13 @@ type Login struct {
 	Password string `json:"password" validate:"required" label:"密码"`
 }
 
+// github token
+type Token struct {
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type"` // 这个字段下面没用到
+	Scope       string `json:"scope"`      // 这个字段下面也没用到
+}
+
 // 修改普通用户密码
 type UpdatePassword struct {
 	Username string `json:"username" validate:"required" label:"用户名"`

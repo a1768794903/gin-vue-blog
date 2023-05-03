@@ -54,6 +54,7 @@ func FrontRouter() http.Handler {
 		base.GET("/code", userAuthAPI.SendCode)          // 验证码
 		base.GET("/home", fBlogInfoAPI.GetFrontHomeInfo) // 前台首页
 		base.GET("/about", blogInfoAPI.GetAbout)         // 获取关于我
+		base.GET("/oauth/redirect/:code", userAuthAPI.Oauth)
 
 		article := base.Group("/article")
 		{
