@@ -10,6 +10,7 @@ import (
 	"gin-blog/model/resp"
 	"gin-blog/utils"
 	"gin-blog/utils/r"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -107,6 +108,152 @@ func (*User) Register(req req.Register) (code int) {
 		LastLoginTime: time.Now(), // 注册时会更新 "上次登录时间"
 	})
 	return r.OK
+}
+
+// 认证并获取用户信息
+func (*User) Oauth(c *gin.Context, code string) (loginVo resp.LoginVO, status int) {
+
+	var err error
+
+	// 通过 code, 获取 token
+	var tokenAuthUrl = GetTokenAuthUrl(code)
+	var token *req.Token
+	if token, err = GetToken(tokenAuthUrl); err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	// 通过token，获取用户信息
+	var userInfo map[string]interface{}
+	if userInfo, err = GetUserInfo(token); err != nil {
+		fmt.Println("获取用户信息失败，错误信息为:", err)
+		return
+	}
+
+	// 检查用户名已存在, 则该账号已经注册过
+	if exist := checkUserExistByName(userInfo["login"].(string)); !exist {
+		var email string = "123@qq.com"
+		if userInfo["email"] != nil {
+			email = userInfo["email"].(string)
+		}
+		user := &model.UserInfo{
+			Email:    email,
+			Nickname: "用户" + userInfo["login"].(string),
+			// blogConfig 中配置的默认用户头像
+			Avatar: blogInfoService.GetBlogConfig().UserAvatar,
+		}
+		dao.Create(&user)
+		// 设置用户默认角色
+		dao.Create(&model.UserRole{
+			UserId: user.ID,
+			RoleId: 3, // 默认角色是 "测试"
+		})
+		dao.Create(&model.UserAuth{
+			UserInfoId:    user.ID,
+			Username:      userInfo["login"].(string),
+			Password:      utils.Encryptor.BcryptHash(userInfo["login"].(string)),
+			LoginType:     1,
+			LastLoginTime: time.Now(), // 注册时会更新 "上次登录时间"
+		})
+	}
+
+	// 检查用户是否存在
+	userAuth := dao.GetOne(model.UserAuth{}, "username", userInfo["login"].(string))
+	if userAuth.ID == 0 {
+		return loginVo, r.ERROR_USER_NOT_EXIST
+	}
+	// 获取用户详细信息 DTO
+	userDetailDTO := convertUserDetailDTO(userAuth, c)
+
+	// 登录信息正确, 生成 Token
+	// TODO: 目前只给用户设定一个角色, 获取第一个值就行, 后期优化: 给用户设置多个角色
+	// UUID 生成方法: ip + 浏览器信息 + 操作系统信息
+	uuid := utils.Encryptor.MD5(userDetailDTO.IpAddress + userDetailDTO.Browser + userDetailDTO.OS)
+	userToken, err := utils.GetJWT().GenToken(userAuth.ID, userDetailDTO.RoleLabels[0], uuid)
+	if err != nil {
+		utils.Logger.Info("登录时生成 Token 错误: ", zap.Error(err))
+		return loginVo, r.ERROR_TOKEN_CREATE
+	}
+	userDetailDTO.Token = userToken
+	// 更新用户验证信息: ip 信息 + 上次登录时间
+	dao.Update(&model.UserAuth{
+		Universal:     model.Universal{ID: userAuth.ID},
+		IpAddress:     userDetailDTO.IpAddress,
+		IpSource:      userDetailDTO.IpSource,
+		LastLoginTime: userDetailDTO.LastLoginTime,
+	}, "ip_address", "ip_source", "last_login_time")
+
+	// 保存用户信息到 Session 和 Redis 中
+	session := sessions.Default(c)
+	// ! session 中只能存储字符串
+	sessionInfoStr := utils.Json.Marshal(dto.SessionInfo{UserDetailDTO: userDetailDTO})
+	session.Set(KEY_USER+uuid, sessionInfoStr) // ! 确实设置到 reids 中, 但是获取不到
+	utils.Redis.Set(KEY_USER+uuid, sessionInfoStr, time.Duration(config.Cfg.Session.MaxAge)*time.Second)
+	// fmt.Println("login: ", KEY_USER+uuid)
+	session.Save()
+	return loginVo, r.OK
+}
+
+// 通过code获取token认证url
+func GetTokenAuthUrl(code string) string {
+	return fmt.Sprintf(
+		"https://github.com/login/oauth/access_token?client_id=%s&client_secret=%s&code=%s",
+		"9c19b7234ac46a6761ed", "7639e0cd1d66f6b4b26ab021317ccb3576b989ed", code,
+	)
+}
+
+// 获取 token
+func GetToken(url string) (*Token, error) {
+
+	// 形成请求
+	var req *http.Request
+	var err error
+	if req, err = http.NewRequest(http.MethodGet, url, nil); err != nil {
+		return nil, err
+	}
+	req.Header.Set("accept", "application/json")
+
+	// 发送请求并获得响应
+	var httpClient = http.Client{}
+	var res *http.Response
+	if res, err = httpClient.Do(req); err != nil {
+		return nil, err
+	}
+
+	// 将响应体解析为 token，并返回
+	var token Token
+	if err = json.NewDecoder(res.Body).Decode(&token); err != nil {
+		return nil, err
+	}
+	return &token, nil
+}
+
+// 获取用户信息
+func GetUserInfo(token *Token) (map[string]interface{}, error) {
+
+	// 形成请求
+	var userInfoUrl = "https://api.github.com/user" // github用户信息获取接口
+	var req *http.Request
+	var err error
+	if req, err = http.NewRequest(http.MethodGet, userInfoUrl, nil); err != nil {
+		return nil, err
+	}
+	req.Header.Set("accept", "application/json")
+	req.Header.Set("Authorization", fmt.Sprintf("token %s", token.AccessToken))
+
+	// 发送请求并获取响应
+	var client = http.Client{}
+	var res *http.Response
+	if res, err = client.Do(req); err != nil {
+		return nil, err
+	}
+
+	// 将响应的数据写入 userInfo 中，并返回
+	var userInfo = make(map[string]interface{})
+	if err = json.NewDecoder(res.Body).Decode(&userInfo); err != nil {
+		return nil, err
+	}
+	return userInfo, nil
 }
 
 // 更新用户邮箱信息

@@ -27,6 +27,13 @@ func (*UserAuth) Login(c *gin.Context) {
 	r.SendData(c, code, loginVo)
 }
 
+// Oauth 登录
+func (*UserAuth) Oauth(c *gin.Context) {
+	oauthCode := utils.GetStringParam(c, "code")
+	loginVo, status := userService.Oauth(c, oauthCode)
+	r.SendData(c, status, loginVo)
+}
+
 // 退出登录
 func (*UserAuth) Logout(c *gin.Context) {
 	userService.Logtout(c)

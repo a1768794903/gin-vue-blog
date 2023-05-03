@@ -112,3 +112,9 @@ func GetIntParam(c *gin.Context, key string) int {
 	}
 	return val
 }
+
+// 从 Context 获取 String 类型 Param 参数
+func GetStringParam(c *gin.Context, key string) string {
+	val := c.Param(key)
+	return val
+}
